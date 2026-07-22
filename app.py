@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory, session, jsonify
+from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory, session, jsonify, Response, stream_with_context
 import psycopg2
 import psycopg2.extras
 import os
@@ -12,6 +12,7 @@ app.secret_key = 'your-secret-key-here'  # Required for sessions
 CART_SERVICE_URL = os.environ.get('CART_SERVICE_URL', 'http://localhost:5002')
 ORDER_SERVICE_URL = os.environ.get('ORDER_SERVICE_URL', 'http://localhost:5001')
 USERS_SERVICE_URL = os.environ.get('USERS_SERVICE_URL', 'http://localhost:5003')
+CHAT_SERVICE_URL = os.environ.get('CHAT_SERVICE_URL', 'http://localhost:5005')
 
 # Database configuration
 DB_HOST = os.environ.get('DB_HOST', 'localhost')
@@ -466,6 +467,172 @@ INDEX_HTML = '''
             font-size: 0.9rem;
         }
 
+        /* Metal Oracle chat */
+        .oracle-fab {
+            position: fixed;
+            bottom: 28px;
+            right: 28px;
+            z-index: 1001;
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            font-size: 1.8rem;
+            cursor: pointer;
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+            transition: transform 0.2s ease;
+        }
+
+        .oracle-fab:hover {
+            transform: scale(1.08);
+        }
+
+        .oracle-modal {
+            display: none;
+            position: fixed;
+            z-index: 1002;
+            right: 28px;
+            bottom: 104px;
+            width: 380px;
+            max-width: calc(100vw - 40px);
+            height: 560px;
+            max-height: calc(100vh - 140px);
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .oracle-modal.open {
+            display: flex;
+        }
+
+        .oracle-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 16px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .oracle-header h3 {
+            font-size: 1.1rem;
+            font-weight: 700;
+        }
+
+        .oracle-header .close {
+            position: static;
+            color: white;
+            font-size: 22px;
+        }
+
+        .oracle-header .close:hover {
+            color: rgba(255,255,255,0.7);
+        }
+
+        .oracle-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            background: #f7f7f9;
+        }
+
+        .oracle-msg {
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: 14px;
+            font-size: 0.9rem;
+            line-height: 1.4;
+            white-space: pre-wrap;
+        }
+
+        .oracle-msg.user {
+            align-self: flex-end;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .oracle-msg.assistant {
+            align-self: flex-start;
+            background: white;
+            color: #1a1a1a;
+            border: 1px solid #e5e5e5;
+            border-bottom-left-radius: 4px;
+        }
+
+        .oracle-msg.error {
+            align-self: center;
+            background: #fdecea;
+            color: #e74c3c;
+            font-size: 0.8rem;
+        }
+
+        .oracle-quick {
+            padding: 10px 16px;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            border-top: 1px solid #eee;
+        }
+
+        .oracle-quick button {
+            background: #f0f0f5;
+            border: none;
+            border-radius: 20px;
+            padding: 6px 12px;
+            font-size: 0.75rem;
+            color: #444;
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+
+        .oracle-quick button:hover {
+            background: #e2e2ea;
+        }
+
+        .oracle-input-row {
+            display: flex;
+            gap: 8px;
+            padding: 12px 16px;
+            border-top: 1px solid #eee;
+        }
+
+        .oracle-input-row input {
+            flex: 1;
+            border: 1px solid #ddd;
+            border-radius: 20px;
+            padding: 10px 16px;
+            font-size: 0.9rem;
+            outline: none;
+        }
+
+        .oracle-input-row input:focus {
+            border-color: #667eea;
+        }
+
+        .oracle-input-row button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 20px;
+            padding: 0 18px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .oracle-input-row button:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+
         /* Cart Notification */
         .cart-notification {
             position: fixed;
@@ -739,6 +906,28 @@ INDEX_HTML = '''
         </div>
     </div>
 
+    <!-- Metal Oracle chat -->
+    <button class="oracle-fab" onclick="toggleOracle()" title="Ask the Metal Oracle">🤘</button>
+    <div id="oracleModal" class="oracle-modal">
+        <div class="oracle-header">
+            <h3>🤘 Metal Oracle</h3>
+            <span class="close" onclick="toggleOracle()">&times;</span>
+        </div>
+        <div id="oracleMessages" class="oracle-messages">
+            <div class="oracle-msg assistant">Hail! Ask me about metal subgenres, bands, or what to grab from the shop.</div>
+        </div>
+        <div class="oracle-quick">
+            <button onclick="oracleQuickAsk('Recommend me some thrash metal')">Recommend thrash</button>
+            <button onclick="oracleQuickAsk('What is the difference between death metal and black metal?')">Death vs black metal</button>
+            <button onclick="oracleQuickAsk('Compare Metallica and Pantera')">Metallica vs Pantera</button>
+            <button onclick="oracleQuickAsk('What should I buy if I like Iron Maiden?')">Iron Maiden fans</button>
+        </div>
+        <div class="oracle-input-row">
+            <input type="text" id="oracleInput" placeholder="Ask the Oracle..." onkeydown="if(event.key==='Enter')oracleSend()">
+            <button id="oracleSendBtn" onclick="oracleSend()">Send</button>
+        </div>
+    </div>
+
     <script>
         function showTab(tabName) {
             // Hide all content sections
@@ -770,6 +959,102 @@ INDEX_HTML = '''
             document.getElementById('loginError').style.display = 'none';
             document.getElementById('username').value = '';
             document.getElementById('password').value = '';
+        }
+
+        // --- Metal Oracle chat ---
+        let oracleHistory = [];
+        let oracleBusy = false;
+
+        function toggleOracle() {
+            const modal = document.getElementById('oracleModal');
+            modal.classList.toggle('open');
+            if (modal.classList.contains('open')) {
+                document.getElementById('oracleInput').focus();
+            }
+        }
+
+        function oracleQuickAsk(question) {
+            document.getElementById('oracleInput').value = question;
+            oracleSend();
+        }
+
+        function oracleAppendMessage(role, text) {
+            const container = document.getElementById('oracleMessages');
+            const div = document.createElement('div');
+            div.className = 'oracle-msg ' + role;
+            div.textContent = text;
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+            return div;
+        }
+
+        async function oracleSend() {
+            if (oracleBusy) return;
+            const input = document.getElementById('oracleInput');
+            const message = input.value.trim();
+            if (!message) return;
+
+            input.value = '';
+            oracleBusy = true;
+            document.getElementById('oracleSendBtn').disabled = true;
+
+            oracleAppendMessage('user', message);
+            const assistantDiv = oracleAppendMessage('assistant', '');
+            let assistantText = '';
+
+            try {
+                const response = await fetch('/api/chat/stream', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: message, history: oracleHistory })
+                });
+
+                if (!response.ok || !response.body) {
+                    assistantDiv.className = 'oracle-msg error';
+                    assistantDiv.textContent = 'Oracle is unreachable (HTTP ' + response.status + ').';
+                    return;
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\\n\\n');
+                    buffer = lines.pop();  // keep incomplete chunk for next read
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data:')) continue;
+                        const dataStr = line.slice(5).trim();
+                        if (dataStr === '[DONE]') continue;
+                        try {
+                            const parsed = JSON.parse(dataStr);
+                            if (parsed.error) {
+                                assistantDiv.className = 'oracle-msg error';
+                                assistantDiv.textContent = parsed.error;
+                            } else if (parsed.delta) {
+                                assistantText += parsed.delta;
+                                assistantDiv.textContent = assistantText;
+                                document.getElementById('oracleMessages').scrollTop = 999999;
+                            }
+                        } catch (e) { /* ignore partial/malformed chunk */ }
+                    }
+                }
+
+                if (assistantText) {
+                    oracleHistory.push({ role: 'user', content: message });
+                    oracleHistory.push({ role: 'assistant', content: assistantText });
+                }
+            } catch (err) {
+                assistantDiv.className = 'oracle-msg error';
+                assistantDiv.textContent = 'Connection error: ' + err.message;
+            } finally {
+                oracleBusy = false;
+                document.getElementById('oracleSendBtn').disabled = false;
+            }
         }
 
         function handleLogin(event) {
@@ -1680,6 +1965,36 @@ def order_success():
         return f"Cart service timeout after 10 seconds", 504
     except requests.RequestException as e:
         return f"Error connecting to cart service: {str(e)}", 503
+
+@app.route('/api/chat/stream', methods=['POST'])
+def chat_stream():
+    """Proxy the Metal Oracle chat request to chat-service, streaming its
+    Server-Sent Events response straight through to the browser."""
+    payload = request.get_json(silent=True) or {}
+
+    def generate():
+        try:
+            with requests.post(
+                f"{CHAT_SERVICE_URL}/api/chat",
+                json=payload,
+                stream=True,
+                timeout=90,
+            ) as upstream:
+                for chunk in upstream.iter_content(chunk_size=None):
+                    if chunk:
+                        yield chunk
+        except requests.Timeout:
+            yield f"data: {{\"error\": \"chat service timeout\"}}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+        except requests.RequestException as e:
+            yield f"data: {{\"error\": \"error connecting to chat service: {str(e)}\"}}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
 
 @app.route('/api/login', methods=['POST'])
 def login():
