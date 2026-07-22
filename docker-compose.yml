@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: music_store
+      POSTGRES_USER: music_user
+      POSTGRES_PASSWORD: music_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database-service/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U music_user -d music_store"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  store-service:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - CART_SERVICE_URL=http://cart-service:5002
+      - ORDER_SERVICE_URL=http://order-service:5001
+      - USERS_SERVICE_URL=http://users-service:5003
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=music_store
+      - DB_USER=music_user
+      - DB_PASSWORD=music_password
+    volumes:
+      - ./static:/app/static
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cart-service:
+        condition: service_started
+      order-service:
+        condition: service_started
+      users-service:
+        condition: service_started
+
+  cart-service:
+    build: ./cart-service
+    ports:
+      - "5002:5002"
+    environment:
+      - STORE_SERVICE_URL=http://store-service:5000
+      - ORDER_SERVICE_URL=http://order-service:5001
+    volumes:
+      - cart-data:/app
+    depends_on:
+      - store-service
+      - order-service
+
+  order-service:
+    build: ./order-service
+    ports:
+      - "5001:5001"
+    environment:
+      - STORE_SERVICE_URL=http://store-service:5000
+    volumes:
+      - order-data:/app
+
+  users-service:
+    build: ./users-service
+    ports:
+      - "5003:5003"
+    environment:
+      - USERS_DB_PATH=/app/users.db
+    volumes:
+      - users-data:/app
+
+  traffic-generator:
+    build: ./traffic-generator
+    ports:
+      - "5004:5004"
+    environment:
+      - STORE_SERVICE_URL=http://store-service:5000
+      - CART_SERVICE_URL=http://cart-service:5002
+      - ORDER_SERVICE_URL=http://order-service:5001
+      - USERS_SERVICE_URL=http://users-service:5003
+    depends_on:
+      - store-service
+      - cart-service
+      - order-service
+      - users-service
+
+volumes:
+  postgres_data:
+  cart-data:
+  order-data:
+  users-data: 
