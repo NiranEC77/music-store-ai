@@ -125,15 +125,21 @@ def _cred_string(value):
 def _from_credentials(creds):
     if not isinstance(creds, dict):
         return None
-    nested = creds.get("endpoint")
-    if isinstance(nested, dict):
-        creds = {**creds, **nested}
-    key = _cred_string(creds.get("api_key") or creds.get("apiKey"))
-    base = creds.get("api_base") or creds.get("url") or creds.get("base_url")
-    if isinstance(base, dict):
-        key = key or _cred_string(base.get("api_key") or base.get("apiKey"))
-        base = base.get("api_base") or base.get("url")
+    nested = creds.get("endpoint") if isinstance(creds.get("endpoint"), dict) else {}
+    key = _cred_string(
+        creds.get("api_key") or nested.get("api_key") or creds.get("apiKey") or nested.get("apiKey")
+    )
+    base = (
+        nested.get("openai_api_base")
+        or creds.get("openai_api_base")
+        or creds.get("api_base")
+        or nested.get("api_base")
+        or creds.get("url")
+        or nested.get("url")
+    )
     base = _cred_string(base).rstrip("/")
+    if base.endswith("/openai"):
+        base = base + "/v1"
     model = _cred_string(
         creds.get("model_name") or creds.get("model") or os.environ.get("OPENAI_MODEL")
     ) or "qwen"
@@ -166,6 +172,10 @@ def resolve_model():
     return base, key, model
 
 
+def tls_verify():
+    return os.environ.get("OPENAI_TLS_VERIFY", "true").lower() not in ("0", "false", "no")
+
+
 def model_stream(message, history, tool_results):
     base, key, model = resolve_model()
     system = (
@@ -193,6 +203,7 @@ def model_stream(message, history, tool_results):
         json={"model": model, "messages": messages, "stream": True},
         stream=True,
         timeout=90,
+        verify=tls_verify(),
     )
     if response.status_code >= 400:
         text = response.text[:300]
