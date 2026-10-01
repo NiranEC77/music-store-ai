@@ -26,6 +26,7 @@ services:
       - CART_SERVICE_URL=http://cart-service:5002
       - ORDER_SERVICE_URL=http://order-service:5001
       - USERS_SERVICE_URL=http://users-service:5003
+      - CHAT_SERVICE_URL=http://chat-service:5005
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_NAME=music_store
@@ -73,6 +74,26 @@ services:
       - USERS_DB_PATH=/app/users.db
     volumes:
       - users-data:/app
+
+  chat-service:
+    build: ./chat-service
+    ports:
+      - "5005:5005"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=music_store
+      - DB_USER=music_user
+      - DB_PASSWORD=music_password
+      - ORDER_SERVICE_URL=http://order-service:5001
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-qwen}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      order-service:
+        condition: service_started
 
   traffic-generator:
     build: ./traffic-generator

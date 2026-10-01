@@ -7,3 +7,4 @@ resources:
   - k8s-deployment.yaml
   - k8s-order-deployment.yaml
   - k8s-users-deployment.yaml
+  - k8s-chat-deployment.yaml

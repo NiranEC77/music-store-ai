@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chat-service
+  template:
+    metadata:
+      labels:
+        app: chat-service
+        app-name: music-store
+        service-name: chat
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: chat
+        image: ghcr.io/niranec77/metal-music-store-chat:1.0.64
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+        ports:
+        - containerPort: 5005
+        env:
+        - name: DB_HOST
+          value: postgres-service
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: music_store
+        - name: DB_USER
+          value: music_user
+        - name: DB_PASSWORD
+          value: music_password
+        - name: ORDER_SERVICE_URL
+          value: http://order-service:5001
+        - name: OPENAI_BASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: metal-oracle-model
+              key: base-url
+              optional: true
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: metal-oracle-model
+              key: api-key
+              optional: true
+        - name: OPENAI_MODEL
+          valueFrom:
+            secretKeyRef:
+              name: metal-oracle-model
+              key: model
+              optional: true
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5005
+          initialDelaySeconds: 3
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat-service
+spec:
+  selector:
+    app: chat-service
+  ports:
+  - name: http
+    port: 5005
+    targetPort: 5005

@@ -13,7 +13,7 @@ This repository holds the store service source (`app.py`) and the deployment fil
 | Cart | 5002 | Cart, quantities, checkout, and a fake card payment |
 | Users | 5003 | Admin login. The store asks it before opening the admin page |
 | Traffic generator | 5004 | Pretends to be shoppers, using a browser |
-| Chat | 5005 | Answers the Metal Oracle. Not started by the files in this repo |
+| Chat | 5005 | Metal Oracle. `chat-service/` calls tools for the catalog and orders, then asks the private model |
 | PostgreSQL | 5432 | Albums. Database name `music_store` |
 
 Cart and orders keep their own SQLite files. Users keeps `users.db`.
@@ -46,7 +46,7 @@ data: [DONE]
 
 The store waits up to 90 seconds, then tells the browser the chat service timed out.
 
-Set `CHAT_SERVICE_URL` on the store. The default is `http://localhost:5005`. This repo does not contain the chat service, and `docker-compose.yml` does not start one. The Kubernetes store manifest does not set `CHAT_SERVICE_URL` either. Until a chat service is running at that address, the button opens and the reply says the Oracle is unreachable.
+Set `CHAT_SERVICE_URL` on the store. The default is `http://localhost:5005`. `chat-service/` is that process. Before it speaks, it calls tools: `album_count` and `list_albums` read Postgres, and `list_orders` reads the order service when the question is about orders. A count question starts with the integer the `album_count` tool returned. The same tools are available at `POST /mcp` (`initialize`, `tools/list`, `tools/call`). It then calls an OpenAI-compatible private model (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`). On Tanzu, a GenAI service binding in `VCAP_SERVICES` supplies those three when the environment variables are empty. It does not invent a title or a count. With no model configured, a count question still answers from the tool, and any other question says the Oracle needs the private language model and reports the catalog count. The Kubernetes store manifest points at `http://chat-service:5005`. The chat image is `ghcr.io/niranec77/metal-music-store-chat:1.0.64`. The model endpoint and key belong in the `metal-oracle-model` secret (`base-url`, `api-key`, `model`), not in git.
 
 `Dockerfile.chat-overlay` puts this `app.py` on top of the published store image `ghcr.io/niranec77/metal-music-store-store:1.0.63`. Build that image when you want the Oracle in a cluster, and set `CHAT_SERVICE_URL` on the store container.
 
@@ -68,6 +68,8 @@ k8s-order-deployment.yaml
 k8s-users-deployment.yaml
 k8s-database-deployment.yaml
 k8s-traffic-generator-deployment.yaml
+k8s-chat-deployment.yaml
+chat-service/
 ```
 
 `docker-compose.yml` builds `./cart-service`, `./order-service`, `./users-service`, and `./traffic-generator`, and it mounts `./database-service/init.sql`. Those directories are not in this repository. `docker compose up --build` from a fresh clone does not start the stack.
@@ -81,7 +83,7 @@ The Kubernetes files pull images that are already published:
 - `ghcr.io/niranec77/metal-music-store-database:1.0.63`
 - `ghcr.io/niranec77/metal-music-store-traffic-generator:1.0.63`
 
-There is no chat image in those manifests.
+The chat manifest is `k8s-chat-deployment.yaml`. `kubectl apply -k .` includes it.
 
 ## Run the published stack
 
