@@ -2,7 +2,7 @@
 
 A demo music store split into small services: the shop, the cart, orders, admin login, a traffic generator, and a chat assistant called the Metal Oracle.
 
-This repository holds the store service source (`app.py`) and the deployment files. The cart, orders, users, database, and traffic generator run from published images. The chat brain is a separate service. The store only streams to it.
+This repository holds the store, cart, orders, users, database init, and the Metal Oracle chat service. The traffic generator still runs only from its published image. The store streams chat to the Oracle. It does not answer itself.
 
 ## Services
 
@@ -52,7 +52,7 @@ Set `CHAT_SERVICE_URL` on the store. The default is `http://localhost:5005`. `ch
 
 ## Admin login
 
-The store has an Admin button. It posts to `/api/login`, `/api/logout`, and `/api/verify`, and the users service is what actually checks the password. The admin page stays closed unless the token belongs to an admin. Shoppers do not get accounts. Payments are still fake.
+The store has an Admin button. It posts to `/api/login`, `/api/logout`, and `/api/verify`, and the users service is what actually checks the password. The admin page stays closed unless the token belongs to an admin. Shoppers do not get accounts. The demo admin is `admin` / `metal`. Payments are still fake.
 
 ## What is in this repository
 
@@ -70,9 +70,15 @@ k8s-database-deployment.yaml
 k8s-traffic-generator-deployment.yaml
 k8s-chat-deployment.yaml
 chat-service/
+cart-service/
+order-service/
+users-service/
+database-service/init.sql
 ```
 
-`docker-compose.yml` builds `./cart-service`, `./order-service`, `./users-service`, and `./traffic-generator`, and it mounts `./database-service/init.sql`. Those directories are not in this repository. `docker compose up --build` from a fresh clone does not start the stack.
+`docker-compose.yml` builds `./cart-service`, `./order-service`, `./users-service`, and `./chat-service`, and it mounts `./database-service/init.sql`. Those are in this repository. It also builds `./traffic-generator`, which is not. `docker compose up --build` still stops on the traffic generator until that directory exists. The shop, cart, orders, admin login, and the Oracle do not need it.
+
+The Kubernetes files still pull the published images below. Build the Dockerfiles in this repository when that registry is not reachable. `Dockerfile.chat-overlay` puts this `app.py` on top of the published store image.
 
 The Kubernetes files pull images that are already published:
 

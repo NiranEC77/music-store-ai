@@ -35,8 +35,11 @@ def get_db_connection():
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'gif'}
 
-# Ensure upload folder exists
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# Ensure upload folder exists. A read-only image still serves the shop.
+try:
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+except OSError:
+    pass
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 @app.route('/test-static')
