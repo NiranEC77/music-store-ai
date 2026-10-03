@@ -13,7 +13,7 @@ This repository holds the store, cart, orders, users, database init, and the Met
 | Cart | 5002 | Cart, quantities, checkout, and a fake card payment |
 | Users | 5003 | Admin login. The store asks it before opening the admin page |
 | Traffic generator | 5004 | Pretends to be shoppers, using a browser |
-| Chat | 5005 | Metal Oracle. `chat-service/` calls tools for the catalog and orders, then asks the private model |
+| Chat | 5005 | Metal Oracle. A Pydantic AI agent. Tools go through an AgentMinder gateway |
 | PostgreSQL | 5432 | Albums. Database name `music_store` |
 
 Cart and orders keep their own SQLite files. Users keeps `users.db`.
@@ -22,7 +22,7 @@ Cart and orders keep their own SQLite files. Users keeps `users.db`.
 
 The shop page has a button labeled with the horns hand. It opens a chat. Suggested questions cover thrash, death metal versus black metal, Metallica versus Pantera, and albums for an Iron Maiden fan.
 
-The browser sends the question to the store. The store does not answer it. It forwards the same JSON to the chat service and streams the reply back.
+The browser sends the question to the store. The store does not answer it. It forwards the same JSON to the chat service and streams the reply back. The chat service waits up to 150 seconds.
 
 ```
 Browser  --POST /api/chat/stream-->  Store :5000  --POST /api/chat-->  Chat :5005
@@ -39,14 +39,23 @@ Request body:
 The reply is a server-sent event stream. Each piece is one of:
 
 ```
-data: {"delta": "next few words"}
+data: {"delta": "the answer"}
+data: {"tool": {"name": "list_albums", "denied": false, "text": "..."}}
 data: {"error": "what went wrong"}
 data: [DONE]
 ```
 
-The store waits up to 90 seconds, then tells the browser the chat service timed out.
+A `tool` event is the AgentMinder result. `denied: true` means the gateway refused the intent. The shop page shows that grant or denial above the answer.
 
-Set `CHAT_SERVICE_URL` on the store. The default is `http://localhost:5005`. `chat-service/` is that process. Before it speaks, it calls tools: `album_count` and `list_albums` read Postgres, and `list_orders` reads the order service when the question is about orders. A count question starts with the integer the `album_count` tool returned. The same tools are available at `POST /mcp` (`initialize`, `tools/list`, `tools/call`). It then calls an OpenAI-compatible private model (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`). On Tanzu, a GenAI service binding in `VCAP_SERVICES` supplies those three when the environment variables are empty. `OPENAI_TLS_VERIFY` defaults to on. Set it to `false` only when the private proxy certificate does not match the name in the binding. It does not invent a title or a count. With no model configured, a count question still answers from the tool, and any other question says the Oracle needs the private language model and reports the catalog count. The Kubernetes store manifest points at `http://chat-service:5005`. The chat image is `ghcr.io/niranec77/metal-music-store-chat:1.0.64`. The model endpoint and key belong in the `metal-oracle-model` secret (`base-url`, `api-key`, `model`), not in git.
+Set `CHAT_SERVICE_URL` on the store. The default is `http://localhost:5005`. `chat-service/` is a Pydantic AI agent. The model calls tools through that agent. Each tool call is an MCP request to an AgentMinder AI Gateway URL (`AGENTMINDER_GATEWAY_URLS`). The agent does not query Postgres, the order service, or `POST /mcp` itself.
+
+`POST /mcp` is the catalog resource server (`initialize`, `tools/list`, `tools/call` for `album_count`, `list_albums`, and `list_orders`). Point AgentMinder's AI resource server at that URL. Bind catalog tools to one intent and order tools to another, and grant the agent only the intents the demo should allow. The gateway then returns the catalog fact or a policy denial.
+
+To add another MCP server later, register it in AgentMinder, bind its tools to intents, grant or withhold those intents, and append that server's gateway URL to `AGENTMINDER_GATEWAY_URLS`. Do not append the upstream MCP URL. Restart the chat process. No new tool function is required.
+
+The agent calls an OpenAI-compatible model (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`). On Tanzu, a GenAI service binding in `VCAP_SERVICES` supplies those three when the environment variables are empty. `OPENAI_TLS_VERIFY` defaults to on. Set it to `false` only when the private proxy certificate does not match the name in the binding. AgentMinder's own certificate is `AGENTMINDER_TLS_VERIFY`, also on by default.
+
+The agent also needs `AGENTMINDER_TOKEN_URL`, `AGENTMINDER_CLIENT_ID`, and `AGENTMINDER_CLIENT_SECRET` for the agent app that holds the grants. With no model configured, the reply says the Oracle needs the private language model and does not read the catalog. With no gateway configured, the agent can still chat and has no tools, so it must not invent a catalog fact. The model endpoint and key belong in the `metal-oracle-model` secret (`base-url`, `api-key`, `model`), not in git. The AgentMinder client secret belongs in `metal-oracle-agent`, not in git.
 
 `Dockerfile.chat-overlay` puts this `app.py` on top of the published store image `ghcr.io/niranec77/metal-music-store-store:1.0.63`. Build that image when you want the Oracle in a cluster, and set `CHAT_SERVICE_URL` on the store container.
 

@@ -1035,7 +1035,17 @@ INDEX_HTML = '''
                         if (dataStr === '[DONE]') continue;
                         try {
                             const parsed = JSON.parse(dataStr);
-                            if (parsed.error) {
+                            if (parsed.tool) {
+                                const name = parsed.tool.name || 'tool';
+                                const denied = !!parsed.tool.denied;
+                                const note = document.createElement('div');
+                                note.className = 'oracle-msg ' + (denied ? 'error' : 'assistant');
+                                const detail = parsed.tool.text ? String(parsed.tool.text).slice(0, 240) : '';
+                                note.textContent = denied
+                                    ? ('AgentMinder denied ' + name + (detail ? ': ' + detail : ''))
+                                    : ('AgentMinder granted ' + name);
+                                assistantDiv.parentNode.insertBefore(note, assistantDiv);
+                            } else if (parsed.error) {
                                 assistantDiv.className = 'oracle-msg error';
                                 assistantDiv.textContent = parsed.error;
                             } else if (parsed.delta) {
@@ -1981,7 +1991,7 @@ def chat_stream():
                 f"{CHAT_SERVICE_URL}/api/chat",
                 json=payload,
                 stream=True,
-                timeout=90,
+                timeout=150,
             ) as upstream:
                 for chunk in upstream.iter_content(chunk_size=None):
                     if chunk:

@@ -1,3 +1,4 @@
 flask
 psycopg2-binary
 requests
+pydantic-ai-slim[openai,mcp]==2.54.0
