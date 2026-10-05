@@ -84,24 +84,58 @@ def test_mcp_notification_is_accepted():
     assert response.status_code == 202
 
 
-def test_toolsets_point_at_the_gateway_only(monkeypatch):
-    seen = []
+def test_chat_asks_the_model_and_not_a_tool(monkeypatch):
+    calls = {}
 
-    class FakeToolset:
-        def __init__(self, url, **kwargs):
-            seen.append({"url": url, "auth": kwargs.get("auth")})
+    class Completions:
+        async def create(self, model, messages):
+            calls["model"] = model
+            calls["roles"] = [item["role"] for item in messages]
+            calls["system"] = messages[0]["content"]
 
-    monkeypatch.setattr(oracle, "MCPToolset", FakeToolset)
-    toolsets = oracle.build_toolsets({"https://agentminder.example/gw/one": "token-value"})
-    assert len(toolsets) == 1
-    assert seen[0]["url"] == "https://agentminder.example/gw/one"
-    assert seen[0]["auth"] == "token-value"
-    assert "mcp" not in seen[0]["url"].split("/")[-1]
+            class Msg:
+                content = "Six albums."
+
+            class Choice:
+                message = Msg()
+
+            class Result:
+                choices = [Choice()]
+
+            return Result()
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            self.chat = type("Chat", (), {"completions": Completions()})()
+
+    def boom(_name):
+        raise AssertionError("the chat called a tool")
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://pais.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "qwen")
+    monkeypatch.setattr(oracle, "AsyncOpenAI", Client)
+    monkeypatch.setattr(oracle, "catalog_context", lambda: "Catalog: unavailable.")
+    monkeypatch.setattr(oracle, "run_tool", boom)
+    client = oracle.app.test_client()
+    got = events(
+        client.post(
+            "/api/chat",
+            json={"message": "how many albums?", "history": [{"role": "user", "content": "hi"}]},
+        )
+    )
+    assert {"delta": "Six albums."} in got
+    assert "[DONE]" in got
+    assert calls["model"] == "qwen"
+    assert calls["roles"] == ["system", "user", "user"]
+    assert "Catalog: unavailable." in calls["system"]
+    assert not any(isinstance(item, dict) and "tool" in item for item in got)
 
 
-def test_denial_text():
-    assert oracle.is_denied("policy denied tool 'list_orders'")
-    assert not oracle.is_denied('{"count": 6, "albums": [{"name": "Colony"}]}')
+def test_health_is_a_chat():
+    client = oracle.app.test_client()
+    body = client.get("/health").get_json()
+    assert body == {"status": "ok", "service": "metal-oracle"}
 
 
 def test_vcap_binding_is_the_model(monkeypatch):

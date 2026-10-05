@@ -1,16 +1,11 @@
 """Metal Oracle. Port 5005.
 
-The shop streams POST /api/chat here. A Pydantic AI agent answers.
-When the model calls a tool, that call goes to an AgentMinder AI
-Gateway URL. This process does not call the catalog, the order
-service, or any MCP server for the agent.
+The shop streams POST /api/chat here. This is a normal chat against
+the private model. It is not an agent and it does not call a gateway.
 
-POST /mcp is the catalog resource server AgentMinder calls after it
-grants an intent. The agent never requests that URL.
-
-Another MCP server is another AgentMinder gateway URL in
-AGENTMINDER_GATEWAY_URLS. Register the server and its intents in
-AgentMinder first. This file does not need a new tool function.
+The reply is grounded in the catalog and recent orders this process
+reads itself. POST /mcp still exposes those reads for a later MCP
+registration. The chat route does not call /mcp.
 """
 
 import asyncio
@@ -18,19 +13,12 @@ import json
 import os
 from dataclasses import dataclass, field
 
-import httpx2
+import httpx
 import psycopg2
 import psycopg2.extras
 import requests
 from flask import Flask, Response, jsonify, request
 from openai import AsyncOpenAI
-from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.openai import OpenAIProvider
-
-os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
 app = Flask(__name__)
 
@@ -61,17 +49,10 @@ TOOL_DEFS = [
 
 INSTRUCTIONS = (
     "You are the Metal Oracle at the Metal Music Store. "
-    "Album names, artists, prices, counts, and orders come only from tool results. "
-    "Never invent an album, artist, price, order, or count. "
-    "Tools are AgentMinder intents. If a tool result says the intent was denied "
-    "or the policy denied the tool, say that AgentMinder denied it and name the tool. "
-    "Do not fill in the missing fact. "
-    "Use list_albums or album_count for catalog questions. "
-    "Use list_orders only when that tool is available. "
-    "If the question is about orders and list_orders is not available, say that "
-    "AgentMinder denied the orders intent. Do not list albums as orders. "
-    "If the question is not about this store's albums or orders, answer in one or two "
-    "sentences and do not call a tool. "
+    "Album names, artists, prices, counts, and orders come only from the "
+    "catalog block in this prompt. Never invent an album, artist, price, order, or count. "
+    "If the catalog or the orders say they are unavailable, say that and do not guess. "
+    "If the question is not about this store, answer in one or two sentences. "
     "Do not say InsightOut."
 )
 
@@ -126,7 +107,7 @@ TOOLS = {
 
 
 def run_tool(name):
-    """Resource-server entry. AgentMinder calls POST /mcp. The agent does not."""
+    """Resource-server entry for POST /mcp. The chat route does not call this."""
     if name not in TOOLS:
         raise KeyError(name)
     return TOOLS[name]()
@@ -196,136 +177,31 @@ def tls_verify():
     return os.environ.get("OPENAI_TLS_VERIFY", "true").lower() not in ("0", "false", "no")
 
 
-def am_tls_verify():
-    return os.environ.get("AGENTMINDER_TLS_VERIFY", "true").lower() not in ("0", "false", "no")
+def catalog_context():
+    """Facts the model may use. A failed read stays unavailable."""
+    parts = []
+    try:
+        parts.append("Catalog: " + json.dumps(tool_list_albums()))
+    except Exception as exc:
+        parts.append(f"Catalog: unavailable ({type(exc).__name__}).")
+    try:
+        parts.append("Orders: " + json.dumps(tool_list_orders()))
+    except Exception as exc:
+        parts.append(f"Orders: unavailable ({type(exc).__name__}).")
+    return "\n".join(parts)
 
 
-def gateway_urls():
-    raw = os.environ.get("AGENTMINDER_GATEWAY_URLS", "")
-    return [item.strip() for item in raw.split(",") if item.strip()]
-
-
-def history_messages(history):
-    out = []
+def chat_messages(message, history):
+    messages = [{"role": "system", "content": INSTRUCTIONS + "\n\n" + catalog_context()}]
     for turn in history or []:
         if not isinstance(turn, dict):
             continue
+        role = turn.get("role")
         content = turn.get("content") or ""
-        if not content:
-            continue
-        if turn.get("role") == "user":
-            out.append(ModelRequest(parts=[UserPromptPart(content=content)]))
-        elif turn.get("role") == "assistant":
-            out.append(ModelResponse(parts=[TextPart(content=content)]))
-    return out
-
-
-def tool_result_text(result):
-    if isinstance(result, str):
-        return result
-    content = getattr(result, "content", None)
-    if content is None and isinstance(result, dict):
-        content = result.get("content", result)
-    if isinstance(content, list):
-        bits = []
-        for block in content:
-            if isinstance(block, str):
-                bits.append(block)
-            elif isinstance(block, dict):
-                bits.append(str(block.get("text") if "text" in block else json.dumps(block)))
-            else:
-                text = getattr(block, "text", None)
-                bits.append(str(text if text is not None else block))
-        return "\n".join(bits)
-    if isinstance(content, (dict, list)):
-        return json.dumps(content)
-    if content is not None:
-        return str(content)
-    return str(result)
-
-
-def is_denied(text):
-    low = (text or "").lower()
-    return (
-        "policy denied" in low
-        or "intent was denied" in low
-        or "backend unavailable" in low
-        or "error 2002" in low
-    )
-
-
-async def record_tool_call(ctx, call_tool, name, tool_args):
-    """Record the gateway result. A denial is text the model can say out loud."""
-    try:
-        result = await call_tool(name, tool_args)
-    except Exception as exc:
-        text = str(exc).strip() or type(exc).__name__
-        if isinstance(ctx.deps, list):
-            ctx.deps.append({"name": name, "text": text, "denied": True})
-        return text
-    text = tool_result_text(result)
-    if isinstance(ctx.deps, list):
-        ctx.deps.append({"name": name, "text": text, "denied": is_denied(text)})
-    return result
-
-
-def build_toolsets(tokens):
-    """One Pydantic MCP toolset per AgentMinder gateway. Not the upstream MCP URL."""
-    verify = am_tls_verify()
-    toolsets = []
-    for url, token in tokens.items():
-        if not url or not token:
-            continue
-        toolsets.append(
-            MCPToolset(
-                url,
-                auth=token,
-                verify=verify,
-                prefer_tasks=False,
-                tool_error_behavior="error",
-                process_tool_call=record_tool_call,
-            )
-        )
-    return toolsets
-
-
-async def mint_token(client, gateway_url):
-    token_url = os.environ.get("AGENTMINDER_TOKEN_URL", "").strip()
-    client_id = os.environ.get("AGENTMINDER_CLIENT_ID", "").strip()
-    client_secret = os.environ.get("AGENTMINDER_CLIENT_SECRET", "").strip()
-    if not token_url or not client_id or not client_secret:
-        raise RuntimeError("AgentMinder client is not configured")
-    response = await client.post(
-        token_url,
-        data={
-            "grant_type": "client_credentials",
-            "scope": "urn:iam:myscopes",
-            "resource": gateway_url,
-        },
-        auth=(client_id, client_secret),
-        headers={"Accept": "application/json"},
-    )
-    body = {}
-    try:
-        body = response.json()
-    except Exception:
-        body = {}
-    token = body.get("access_token") if isinstance(body, dict) else ""
-    if response.status_code >= 400 or not token:
-        err = body.get("error") if isinstance(body, dict) else ""
-        raise RuntimeError(f"AgentMinder token HTTP {response.status_code} {err}".strip())
-    return token
-
-
-async def mint_all(client):
-    tokens = {}
-    errors = []
-    for url in gateway_urls():
-        try:
-            tokens[url] = await mint_token(client, url)
-        except Exception as exc:
-            errors.append(str(exc))
-    return tokens, errors
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": message or ""})
+    return messages
 
 
 @dataclass
@@ -339,39 +215,26 @@ async def oracle_turn(message, history):
     base, key, model_name = resolve_model()
     if not base or not key:
         return TurnResult(error="The Metal Oracle needs the private language model.")
-    seen = []
-    async with httpx2.AsyncClient(verify=am_tls_verify(), timeout=httpx2.Timeout(30.0)) as am_client:
-        tokens, mint_errors = await mint_all(am_client)
-    model_http = httpx2.AsyncClient(verify=tls_verify(), timeout=httpx2.Timeout(90.0))
+    model_http = httpx.AsyncClient(verify=tls_verify(), timeout=httpx.Timeout(90.0))
     try:
-        openai_client = AsyncOpenAI(
+        client = AsyncOpenAI(
             base_url=base,
             api_key=key,
             http_client=model_http,
             max_retries=0,
         )
-        model = OpenAIChatModel(model_name, provider=OpenAIProvider(openai_client=openai_client))
-        agent = Agent(
-            model,
-            instructions=INSTRUCTIONS,
-            deps_type=list,
-            retries=1,
-            toolsets=build_toolsets(tokens),
+        result = await client.chat.completions.create(
+            model=model_name,
+            messages=chat_messages(message, history),
         )
-        async with agent:
-            result = await agent.run(
-                message or "",
-                message_history=history_messages(history),
-                deps=seen,
-            )
-        text = result.output or ""
-        if mint_errors and not tokens:
-            seen.append({"name": "agentminder", "text": mint_errors[0], "denied": True})
-        return TurnResult(text=text, tools=list(seen))
+        text = ""
+        if result.choices:
+            text = result.choices[0].message.content or ""
+        return TurnResult(text=text)
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         label = type(exc).__name__ if status is None else f"{type(exc).__name__} HTTP {status}"
-        return TurnResult(error=f"private model: {label}", tools=list(seen))
+        return TurnResult(error=f"private model: {label}")
     finally:
         await model_http.aclose()
 
@@ -423,19 +286,12 @@ def handle_rpc(msg):
 
 @app.get("/health")
 def health():
-    return jsonify(
-        {
-            "status": "ok",
-            "service": "metal-oracle",
-            "agent": "pydantic-ai",
-            "doors": len(gateway_urls()),
-        }
-    )
+    return jsonify({"status": "ok", "service": "metal-oracle"})
 
 
 @app.route("/mcp", methods=["GET", "POST", "DELETE"])
 def mcp():
-    """Catalog door for AgentMinder. The chat agent does not call this route."""
+    """Catalog door. The chat route does not call this."""
     if request.method == "GET":
         return Response(
             '{"error":"POST JSON-RPC to /mcp"}',
